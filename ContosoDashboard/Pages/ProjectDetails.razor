@@ -18,7 +18,7 @@
     else
     {
         <div class="row mb-4">
-            <div class="col">
+            <div class="col-md-8">
                 <nav aria-label="breadcrumb">
                     <ol class="breadcrumb">
                         <li class="breadcrumb-item"><a href="/projects">My Projects</a></li>
@@ -26,6 +26,11 @@
                     </ol>
                 </nav>
                 <h1>@project.Name</h1>
+            </div>
+            <div class="col-md-4 text-end">
+                <a href="@($"/project/{ProjectId}/documents")" class="btn btn-primary">
+                    <i class="bi bi-file-earmark-pdf"></i> Documents
+                </a>
             </div>
         </div>
 
