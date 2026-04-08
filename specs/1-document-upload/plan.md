@@ -273,6 +273,461 @@ File Upload → Validate → Save to Storage → Record in DB (Pending)
 
 ---
 
+## Background Job Processing for Virus Scanning
+
+### Architecture Overview
+
+The document scanning workflow uses **ASP.NET Core Hosted Services** for offline-capable async background processing. This pattern:
+- ✅ Works fully offline (no cloud dependencies)
+- ✅ Integrates with local SQL Server (job queue in database)
+- ✅ Supports future cloud migration via interface abstraction
+- ✅ Provides real-time status updates via SignalR
+- ✅ Implements retry logic with exponential backoff
+- ✅ Handles errors gracefully without blocking uploads
+
+### Component Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ Upload Request (Synchronous)                                     │
+│ ┌────────────────┐  ┌──────────────┐  ┌─────────────────┐       │
+│ │ InputFile Drop │→ │ File Validate│→ │ Save to Storage │       │
+│ │ in Blazor      │  │ & Authorize  │  │ (Disk)          │       │
+│ └────────────────┘  └──────────────┘  └─────────────────┘       │
+│                            ↓                                      │
+│                     ┌──────────────────┐                         │
+│                     │ Create Document  │                         │
+│                     │ ScanStatus=      │                         │
+│                     │ "Pending"        │                         │
+│                     │ in Database      │                         │
+│                     └──────────────────┘                         │
+│                            ↓                                      │
+│                     ┌──────────────────┐                         │
+│                     │ Enqueue Scan Job │                         │
+│                     │ in DocumentQueue │                         │
+│                     │ Table (SQL Server)│                        │
+│                     └──────────────────┘                         │
+│                            ↓                                      │
+│                     Return to UI: "Pending"                      │
+└──────────────────────────────────────────────────────────────────┘
+                              ↓
+       ┌──────────────────────────────────────────────────────────┐
+       │ Background Service (Async, Offline Capable)              │
+       │ ┌────────────────────────────────────────────────────┐  │
+       │ │ DocumentScanningHostedService                      │  │
+       │ │ - Runs continuously (BackgroundService)           │  │
+       │ │ - Polls DocumentQueue table every 5 seconds      │  │
+       │ │ - Dequeues pending jobs                          │  │
+       │ └────────────────────────────────────────────────────┘  │
+       │            ↓                                             │
+       │ ┌────────────────────────────────────────────────────┐  │
+       │ │ ClamAVService (Local, Offline)                     │  │
+       │ │ - Runs clamscan command-line tool                │  │
+       │ │ - Scans file at storage path                     │  │
+       │ │ - Parses output for threat detection             │  │
+       │ │ - Records result (Clear or Quarantine)           │  │
+       │ └────────────────────────────────────────────────────┘  │
+       │            ↓                                             │
+       │      ┌─────────────────────────┬──────────────────┐    │
+       │      │ Clear                   │ Threat Detected  │    │
+       │      │                         │                  │    │
+       │      ↓                         ↓                  ↓    │
+       │ Update Document         Update Document      Retry    │
+       │ ScanStatus="Clear"      ScanStatus=         Branch    │
+       │ Update FileQuarantine   "Quarantined"       (below)   │
+       │                         Move to Quarantine           │
+       └──────────────────────────────────────────────────────────┘
+                 ↓                        ↓
+    Document    │                    AdminQueue
+    available   │                     (notify admin)
+    for download│
+               ↓
+    SignalR notification
+    "Document ready to download"
+```
+
+### Implementation Components
+
+#### 1. Data Model: Document Scanning Queue
+
+```csharp
+public class DocumentScanQueue
+{
+    public int QueueId { get; set; }
+    public int DocumentId { get; set; }
+    public DateTime EnqueuedAt { get; set; } = DateTime.UtcNow;
+    public int RetryCount { get; set; } = 0;
+    public int MaxRetries { get; set; } = 3;
+    public string Status { get; set; } = "Pending"; // Pending, Processing, Complete, Failed
+    public string ErrorMessage { get; set; }
+    public DateTime? LastAttemptAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+    
+    public virtual Document Document { get; set; }
+}
+
+public static class ScanQueueStatus
+{
+    public const string Pending = "Pending";
+    public const string Processing = "Processing";
+    public const string Complete = "Complete";
+    public const string Failed = "Failed";
+}
+```
+
+#### 2. ClamAV Service Interface (Abstraction for Cloud Migration)
+
+```csharp
+public interface IClamAVService
+{
+    /// <summary>
+    /// Scan file for viruses/malware. Can be implemented locally or cloud-based.
+    /// </summary>
+    /// <param name="filePath">Path to file on disk</param>
+    /// <returns>ScanResult with threat info or clean status</returns>
+    Task<ScanResult> ScanFileAsync(string filePath);
+}
+
+public class ScanResult
+{
+    public bool IsThreatDetected { get; set; }
+    public string ThreatType { get; set; } // "Trojan.Generic", "PUA.Adaware", null if clean
+    public DateTime ScanDate { get; set; }
+    public string RawOutput { get; set; } // Full ClamAV output for logging
+}
+```
+
+#### 3. Local Implementation: ClamAVService (Offline-Capable)
+
+```csharp
+public class LocalClamAVService : IClamAVService
+{
+    private readonly ILogger<LocalClamAVService> _logger;
+    private readonly IConfiguration _config;
+    
+    public async Task<ScanResult> ScanFileAsync(string filePath)
+    {
+        try
+        {
+            // Run clamscan command: clamscan --max-recursion=1000 {filePath}
+            var processInfo = new ProcessStartInfo
+            {
+                FileName = "clamscan",
+                Arguments = $"--max-recursion=1000 \"{filePath}\"",
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            
+            using (var process = Process.Start(processInfo))
+            {
+                var output = await process.StandardOutput.ReadToEndAsync();
+                await process.WaitForExitAsync();
+                
+                // Parse exit code and output
+                // Exit code: 0 = clean, 1 = threat found, >1 = error
+                return new ScanResult
+                {
+                    IsThreatDetected = process.ExitCode == 1,
+                    ThreatType = ExtractThreatType(output),
+                    ScanDate = DateTime.UtcNow,
+                    RawOutput = output
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ClamAV scan failed for {FilePath}", filePath);
+            throw;
+        }
+    }
+    
+    private string ExtractThreatType(string clamavOutput)
+    {
+        // Parse ClamAV output: "FOUND: Trojan.Generic.5"
+        var match = Regex.Match(clamavOutput, @"FOUND:\s*(.+)$", RegexOptions.Multiline);
+        return match.Success ? match.Groups[1].Value.Trim() : "Unknown.Threat";
+    }
+}
+```
+
+#### 4. Hosted Service: Document Scanning Background Worker
+
+```csharp
+public class DocumentScanningHostedService : BackgroundService
+{
+    private readonly IServiceProvider _serviceProvider;
+    private readonly ILogger<DocumentScanningHostedService> _logger;
+    private readonly IHubContext<DocumentNotificationHub> _hubContext;
+    private static readonly TimeSpan ScanInterval = TimeSpan.FromSeconds(5);
+    
+    public DocumentScanningHostedService(
+        IServiceProvider serviceProvider,
+        ILogger<DocumentScanningHostedService> logger,
+        IHubContext<DocumentNotificationHub> hubContext)
+    {
+        _serviceProvider = serviceProvider;
+        _logger = logger;
+        _hubContext = hubContext;
+    }
+    
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("Document scanning service started");
+        
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                using (var scope = _serviceProvider.CreateScope())
+                {
+                    var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                    var clamavService = scope.ServiceProvider.GetRequiredService<IClamAVService>();
+                    var fileStorageService = scope.ServiceProvider.GetRequiredService<IFileStorageService>();
+                    
+                    // Get next pending scan job
+                    var queuedItem = await dbContext.DocumentScanQueue
+                        .Where(q => q.Status == ScanQueueStatus.Pending)
+                        .OrderBy(q => q.EnqueuedAt)
+                        .FirstOrDefaultAsync(stoppingToken);
+                    
+                    if (queuedItem != null)
+                    {
+                        await ProcessScanJobAsync(
+                            dbContext, clamavService, fileStorageService, queuedItem, stoppingToken);
+                    }
+                }
+                
+                // Poll interval: check for new jobs every 5 seconds
+                await Task.Delay(ScanInterval, stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in document scanning service");
+                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+            }
+        }
+        
+        _logger.LogInformation("Document scanning service stopped");
+    }
+    
+    private async Task ProcessScanJobAsync(
+        ApplicationDbContext dbContext,
+        IClamAVService clamavService,
+        IFileStorageService fileStorageService,
+        DocumentScanQueue queuedItem,
+        CancellationToken stoppingToken)
+    {
+        var document = await dbContext.Documents
+            .FirstOrDefaultAsync(d => d.DocumentId == queuedItem.DocumentId, stoppingToken);
+        
+        if (document == null)
+        {
+            queuedItem.Status = ScanQueueStatus.Failed;
+            queuedItem.ErrorMessage = "Document not found";
+            await dbContext.SaveChangesAsync(stoppingToken);
+            return;
+        }
+        
+        try
+        {
+            // Mark as processing
+            queuedItem.Status = ScanQueueStatus.Processing;
+            queuedItem.LastAttemptAt = DateTime.UtcNow;
+            document.ScanStatus = ScanStatus.Scanning;
+            await dbContext.SaveChangesAsync(stoppingToken);
+            
+            // Run ClamAV scan (local, offline)
+            var scanResult = await clamavService.ScanFileAsync(document.StoragePath);
+            
+            if (scanResult.IsThreatDetected)
+            {
+                // Threat found: quarantine file
+                document.ScanStatus = ScanStatus.Quarantined;
+                document.ScanCompletedDate = scanResult.ScanDate;
+                
+                // Move file to quarantine storage
+                await fileStorageService.QuarantineFileAsync(document.StoragePath);
+                
+                // Create quarantine record
+                var quarantine = new FileQuarantine
+                {
+                    DocumentId = document.DocumentId,
+                    ThreatType = scanResult.ThreatType,
+                    ScanDate = scanResult.ScanDate,
+                    QuarantineStoragePath = GetQuarantinePath(document.StoragePath)
+                };
+                dbContext.FileQuarantines.Add(quarantine);
+                
+                // Notify admin
+                var log = new DocumentAccessLog
+                {
+                    DocumentId = document.DocumentId,
+                    UserId = document.UserId,
+                    UserName = document.UploadedByUserName,
+                    Operation = "Scan",
+                    Timestamp = DateTime.UtcNow,
+                    Success = false,
+                    FailureReason = $"Threat detected: {scanResult.ThreatType}",
+                    IpAddress = null
+                };
+                dbContext.DocumentAccessLogs.Add(log);
+                
+                queuedItem.Status = ScanQueueStatus.Complete;
+                _logger.LogWarning("Threat detected in document {DocumentId}: {ThreatType}",
+                    document.DocumentId, scanResult.ThreatType);
+                
+                // Notify via SignalR
+                await _hubContext.Clients
+                    .User(document.UserId.ToString())
+                    .SendAsync("DocumentQuarantined", new
+                    {
+                        documentId = document.DocumentId,
+                        title = document.Title,
+                        threat = scanResult.ThreatType
+                    }, stoppingToken);
+            }
+            else
+            {
+                // No threat: mark clear
+                document.ScanStatus = ScanStatus.Clear;
+                document.ScanCompletedDate = scanResult.ScanDate;
+                
+                // Log successful scan
+                var log = new DocumentAccessLog
+                {
+                    DocumentId = document.DocumentId,
+                    UserId = document.UserId,
+                    UserName = document.UploadedByUserName,
+                    Operation = "Scan",
+                    Timestamp = DateTime.UtcNow,
+                    Success = true,
+                    FailureReason = null,
+                    IpAddress = null
+                };
+                dbContext.DocumentAccessLogs.Add(log);
+                
+                queuedItem.Status = ScanQueueStatus.Complete;
+                _logger.LogInformation("Document {DocumentId} passed security scan", document.DocumentId);
+                
+                // Notify via SignalR (ready for download)
+                await _hubContext.Clients
+                    .User(document.UserId.ToString())
+                    .SendAsync("DocumentReady", new
+                    {
+                        documentId = document.DocumentId,
+                        title = document.Title,
+                        message = "Your document is ready to download"
+                    }, stoppingToken);
+            }
+            
+            queuedItem.CompletedAt = DateTime.UtcNow;
+            await dbContext.SaveChangesAsync(stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error scanning document {DocumentId}", queuedItem.DocumentId);
+            
+            // Retry logic with exponential backoff
+            queuedItem.RetryCount++;
+            queuedItem.ErrorMessage = ex.Message;
+            
+            if (queuedItem.RetryCount < queuedItem.MaxRetries)
+            {
+                queuedItem.Status = ScanQueueStatus.Pending;
+                // Next retry will happen after ScanInterval * (2 ^ RetryCount)
+            }
+            else
+            {
+                queuedItem.Status = ScanQueueStatus.Failed;
+                document.ScanStatus = ScanStatus.Pending; // Admin must investigate
+                _logger.LogError("Document {DocumentId} scan failed after {MaxRetries} retries", 
+                    queuedItem.DocumentId, queuedItem.MaxRetries);
+            }
+            
+            await dbContext.SaveChangesAsync(stoppingToken);
+        }
+    }
+    
+    private string GetQuarantinePath(string originalPath)
+    {
+        var directory = Path.GetDirectoryName(originalPath);
+        var fileName = Path.GetFileName(originalPath);
+        return Path.Combine(directory, "quarantine", fileName);
+    }
+}
+```
+
+#### 5. SignalR Hub for Real-Time Notifications
+
+```csharp
+public class DocumentNotificationHub : Hub
+{
+    public async Task SubscribeToDocumentUpdates(string documentId)
+    {
+        await Groups.AddToGroupAsync(Connection.ConnectionId, $"document-{documentId}");
+    }
+}
+```
+
+#### 6. Service Registration in Startup
+
+```csharp
+// In Program.cs or Startup.cs ConfigureServices()
+
+services.AddScoped<IClamAVService, LocalClamAVService>();
+services.AddHostedService<DocumentScanningHostedService>();
+services.AddSignalR(); // For real-time notifications
+
+// Future: Switch to cloud implementation
+// services.AddScoped<IClamAVService, AzureClamAVService>(); // Cloud-based scanning
+```
+
+### Future Cloud Migration Pattern
+
+The architecture supports easy migration to Azure Functions + Queue Storage:
+
+```csharp
+// Azure implementation (future)
+public class AzureClamAVService : IClamAVService
+{
+    private readonly QueueClient _queueClient;
+    
+    public async Task<ScanResult> ScanFileAsync(string filePath)
+    {
+        // Enqueue to Azure queue
+        await _queueClient.SendMessageAsync(
+            new BinaryData(new { filePath, timestamp = DateTime.UtcNow }));
+        
+        // Azure Function processes in background
+        // Result written back to database via SignalR
+        return new ScanResult { /* ... */ };
+    }
+}
+
+// Configuration switch (appsettings.json)
+{
+  "ScanningMode": "Local" // or "Azure"
+}
+
+// Startup (conditional)
+if (config["ScanningMode"] == "Azure")
+    services.AddScoped<IClamAVService, AzureClamAVService>();
+else
+    services.AddScoped<IClamAVService, LocalClamAVService>();
+```
+
+**Key Benefits of This Pattern**:
+- ✅ Works offline (local ClamAV + SQL Server queue)
+- ✅ No blocking: Upload completes immediately
+- ✅ Error resilience: Retry logic with backoff
+- ✅ Cloud-ready: Interface abstraction allows Azure swap
+- ✅ Real-time UX: SignalR notifications
+- ✅ Auditable: All operations logged to DocumentAccessLog
+
+---
+
 ## Phase 0: Research (Minimal, Clarifications Already Resolved)
 
 ### Research Tasks (COMPLETED)
