@@ -49,6 +49,7 @@ namespace ContosoDashboard.Services.Documents
                         var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
                         var clamavService = scope.ServiceProvider.GetRequiredService<IClamAVService>();
                         var fileStorageService = scope.ServiceProvider.GetRequiredService<IFileStorageService>();
+                        var notificationService = scope.ServiceProvider.GetRequiredService<DocumentNotificationService>();
 
                         // Get next pending scan job from queue
                         var queuedItem = await dbContext.DocumentScanQueues
@@ -63,6 +64,7 @@ namespace ContosoDashboard.Services.Documents
                                 dbContext,
                                 clamavService,
                                 fileStorageService,
+                                notificationService,
                                 queuedItem,
                                 stoppingToken);
 
@@ -99,6 +101,7 @@ namespace ContosoDashboard.Services.Documents
             ApplicationDbContext dbContext,
             IClamAVService clamavService,
             IFileStorageService fileStorageService,
+            DocumentNotificationService notificationService,
             DocumentScanQueue queuedItem,
             CancellationToken stoppingToken)
         {
@@ -208,6 +211,21 @@ namespace ContosoDashboard.Services.Documents
 
                     _logger.LogWarning("Document {DocumentId} quarantined due to threat: {ThreatType}",
                         document.DocumentId, scanResult.ThreatType);
+
+                    // Send real-time notification about quarantine
+                    try
+                    {
+                        await notificationService.NotifyDocumentQuarantinedAsync(
+                            document.DocumentId,
+                            document.UserId,
+                            document.FileName,
+                            scanResult.ThreatType);
+                    }
+                    catch (Exception notifyEx)
+                    {
+                        _logger.LogWarning(notifyEx, "Failed to send quarantine notification for document {DocumentId}",
+                            document.DocumentId);
+                    }
                 }
                 else
                 {
@@ -237,6 +255,31 @@ namespace ContosoDashboard.Services.Documents
                 }
 
                 await dbContext.SaveChangesAsync(stoppingToken);
+
+                // Send real-time notification if scan completed successfully (no errors)
+                if (!scanResult.ScanError)
+                {
+                    try
+                    {
+                        if (scanResult.IsThreatDetected)
+                        {
+                            // Notification for threat already sent above
+                        }
+                        else
+                        {
+                            // Document is clear, send ready notification
+                            await notificationService.NotifyDocumentReadyAsync(
+                                document.DocumentId,
+                                document.UserId,
+                                document.FileName);
+                        }
+                    }
+                    catch (Exception notifyEx)
+                    {
+                        _logger.LogWarning(notifyEx, "Failed to send ready notification for document {DocumentId}",
+                            document.DocumentId);
+                    }
+                }
             }
             catch (Exception ex)
             {

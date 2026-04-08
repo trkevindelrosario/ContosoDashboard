@@ -49,6 +49,10 @@ builder.Services.AddScoped<IDashboardService, DashboardService>();
 builder.Services.AddScoped<IDocumentService, DocumentService>();
 builder.Services.AddScoped<IFileStorageService, FileStorageService>();
 builder.Services.AddScoped<IClamAVService, LocalClamAVService>();
+builder.Services.AddScoped<DocumentNotificationService>();
+
+// Register SignalR for real-time document notifications
+builder.Services.AddSignalR();
 
 // Register hosted service for background async virus scanning
 builder.Services.AddHostedService<DocumentScanningHostedService>();
@@ -115,6 +119,8 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapBlazorHub();
+app.MapHub<DocumentNotificationHub>("/hubs/document-notifications");
+app.MapControllers(); // Add this to enable API controllers
 app.MapFallbackToPage("/_Host");
 
 app.Run();

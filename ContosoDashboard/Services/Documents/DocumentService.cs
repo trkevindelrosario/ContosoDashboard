@@ -607,5 +607,139 @@ namespace ContosoDashboard.Services.Documents
 
             return sorted;
         }
+
+        /// <summary>
+        /// Upload a document from IFormFile (HTTP upload).
+        /// Validates file, stores it, creates document record, enqueues scan job.
+        /// </summary>
+        public async Task<int> UploadAsync(
+            int userId,
+            int? projectId,
+            string title,
+            string description,
+            string categoryStr,
+            List<string> tags,
+            IFormFile file)
+        {
+            if (file == null || file.Length == 0)
+                throw new ArgumentException("No file provided");
+
+            if (string.IsNullOrWhiteSpace(title) || title.Length > 255)
+                throw new ArgumentException("Title must be 1-255 characters");
+
+            if (description?.Length > 1000)
+                throw new ArgumentException("Description must be max 1000 characters");
+
+            // Validate file size
+            if (file.Length > _maxFileSizeBytes)
+                throw new ArgumentException($"File exceeds maximum size of {_maxFileSizeBytes / (1024 * 1024)}MB");
+
+            // Validate file type
+            if (!IsSupportedFileType(file.FileName, file.ContentType))
+                throw new ArgumentException($"File type not supported. Supported types: PDF, DOCX, XLSX, PPTX, TXT, JPG, PNG, CSV, ZIP");
+
+            // Validate category enum
+            if (!Enum.TryParse<DocumentCategory>(categoryStr, out var category))
+                throw new ArgumentException($"Invalid category: {categoryStr}");
+
+            // Validate user exists
+            var user = await _dbContext.Users.FindAsync(userId);
+            if (user == null)
+                throw new ArgumentException("User not found");
+
+            // Validate project membership if specified
+            if (projectId.HasValue)
+            {
+                var project = await _dbContext.Projects.FindAsync(projectId);
+                if (project == null)
+                    throw new ArgumentException("Project not found");
+
+                var isMember = await _dbContext.ProjectMembers
+                    .AnyAsync(pm => pm.ProjectId == projectId && pm.UserId == userId);
+                var isManager = project.ProjectManagerId == userId;
+
+                if (!isMember && !isManager)
+                    throw new UnauthorizedAccessException("User is not assigned to this project");
+            }
+
+            // Check storage space
+            var hasSpace = await _fileStorageService.HasSufficientSpaceAsync(file.Length);
+            if (!hasSpace)
+                throw new InvalidOperationException("Insufficient storage space available");
+
+            try
+            {
+                // Generate storage path
+                var storagePath = _fileStorageService.GenerateStoragePath(userId, projectId, file.FileName);
+
+                // Save file to disk
+                using (var fileStream = file.OpenReadStream())
+                {
+                    var fileSaved = await _fileStorageService.SaveFileAsync(storagePath, fileStream);
+                    if (!fileSaved)
+                        throw new InvalidOperationException("Failed to save file to storage");
+                }
+
+                // Create document record
+                var document = new Document
+                {
+                    UserId = userId,
+                    ProjectId = projectId,
+                    Title = title,
+                    Description = description,
+                    Category = category,
+                    Tags = string.Join(",", tags),
+                    FileName = file.FileName,
+                    StoragePath = storagePath,
+                    FileSize = file.Length,
+                    MimeType = file.ContentType ?? "application/octet-stream",
+                    ScanStatus = ScanStatus.Pending,
+                    UploadDate = DateTime.UtcNow,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                };
+
+                await _dbContext.Documents.AddAsync(document);
+                await _dbContext.SaveChangesAsync();
+
+                // Enqueue scan job
+                var scanJob = new DocumentScanQueue
+                {
+                    DocumentId = document.DocumentId,
+                    EnqueuedAt = DateTime.UtcNow,
+                    Status = "Pending",
+                    MaxRetries = 3
+                };
+
+                await _dbContext.DocumentScanQueues.AddAsync(scanJob);
+                await _dbContext.SaveChangesAsync();
+
+                // Log upload
+                await LogAccessAsync(document.DocumentId, userId, user.DisplayName ?? user.Email,
+                    DocumentOperation.Upload, success: true);
+
+                _logger.LogInformation("Document uploaded: ID={DocumentId}, Title={Title}, User={UserId}, File={FileName}",
+                    document.DocumentId, title, userId, file.FileName);
+
+                return document.DocumentId;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error uploading document for user {UserId}", userId);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Check if a file type is supported for upload.
+        /// </summary>
+        private bool IsSupportedFileType(string fileName, string contentType)
+        {
+            var supportedExtensions = new[] { ".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".jpg", ".jpeg", ".png", ".csv", ".zip" };
+            
+            var fileExtension = Path.GetExtension(fileName)?.ToLower();
+            return !string.IsNullOrEmpty(fileExtension) && supportedExtensions.Contains(fileExtension);
+        }
     }
 }
+

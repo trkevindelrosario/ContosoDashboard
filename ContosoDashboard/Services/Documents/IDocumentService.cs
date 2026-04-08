@@ -1,4 +1,5 @@
 using ContosoDashboard.Models.Documents;
+using Microsoft.AspNetCore.Http;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -111,6 +112,27 @@ namespace ContosoDashboard.Services.Documents
             int userId, 
             int? projectId, 
             FilterCriteria criteria);
+
+        /// <summary>
+        /// Upload a document from an IFormFile (from HTTP request).
+        /// Handles file validation, storage, and scan job enqueueing.
+        /// </summary>
+        /// <param name="userId">User uploading the document</param>
+        /// <param name="projectId">Optional project association</param>
+        /// <param name="title">Document title</param>
+        /// <param name="description">Optional description</param>
+        /// <param name="category">Document category</param>
+        /// <param name="tags">Optional tags list</param>
+        /// <param name="file">IFormFile from HTTP request</param>
+        /// <returns>DocumentId if successful, throws exception if validation fails</returns>
+        Task<int> UploadAsync(
+            int userId,
+            int? projectId,
+            string title,
+            string description,
+            string category,
+            List<string> tags,
+            IFormFile file);
     }
 
     /// <summary>
@@ -122,7 +144,7 @@ namespace ContosoDashboard.Services.Documents
         public DocumentCategory? Category { get; set; }
         public DateTime? UploadDateFrom { get; set; }
         public DateTime? UploadDateTo { get; set; }
-        public string SortBy { get; set; } = "UploadDate"; // Title, UploadDate, FileSize, Uploader
+        public string SortBy { get; set; } = "UploadDate";
         public bool SortDescending { get; set; } = true;
         public int? UploaderUserId { get; set; }
         public long? MinFileSize { get; set; }

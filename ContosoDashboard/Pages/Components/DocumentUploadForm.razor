@@ -1,0 +1,282 @@
+@using Microsoft.AspNetCore.Components.Forms
+@using System.Collections.Generic
+
+<div class="card">
+    <div class="card-header">
+        <h5 class="mb-0">Upload Document</h5>
+    </div>
+    <div class="card-body">
+        @if (uploadInProgress)
+        {
+            <div class="alert alert-info" role="alert">
+                <div class="spinner-border spinner-border-sm me-2" role="status">
+                    <span class="visually-hidden">Uploading...</span>
+                </div>
+                Uploading file: @uploadFileName... (@uploadProgressPercent%)
+            </div>
+        }
+
+        @if (!string.IsNullOrEmpty(errorMessage))
+        {
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                <strong>Upload Failed:</strong> @errorMessage
+                <button type="button" class="btn-close" @onclick="ClearError"></button>
+            </div>
+        }
+
+        @if (!string.IsNullOrEmpty(successMessage))
+        {
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                <strong>Success:</strong> @successMessage
+                <button type="button" class="btn-close" @onclick="ClearSuccess"></button>
+            </div>
+        }
+
+        <EditForm Model="@uploadModel" OnValidSubmit="@HandleSubmit">
+            <DataAnnotationsValidator />
+            <ValidationSummary class="alert alert-warning" />
+
+            <div class="mb-3">
+                <label for="file-input" class="form-label">Select File <span class="text-danger">*</span></label>
+                <InputFile id="file-input" class="form-control"
+                    @ref="fileInput" OnChange="@OnFileSelected" accept=".pdf,.docx,.xlsx,.pptx,.txt,.jpg,.jpeg,.png,.csv,.zip" />
+                <div class="form-text">
+                    Max file size: 25MB | Supported: PDF, DOCX, XLSX, PPTX, TXT, JPG, PNG, CSV, ZIP
+                </div>
+                @if (selectedFile != null)
+                {
+                    <small class="d-block mt-2 text-muted">
+                        Selected: @selectedFile.Name (@FormatFileSize(selectedFile.Size))
+                    </small>
+                }
+            </div>
+
+            <div class="mb-3">
+                <label for="title" class="form-label">Document Title <span class="text-danger">*</span></label>
+                <InputText id="title" class="form-control"
+                    @bind-Value="uploadModel.Title" placeholder="Enter document title" />
+                <div class="invalid-feedback">@GetError("title")</div>
+            </div>
+
+            <div class="mb-3">
+                <label for="description" class="form-label">Description</label>
+                <InputTextArea id="description" class="form-control" rows="3"
+                    @bind-Value="uploadModel.Description" placeholder="Enter document description (optional)" />
+                <small class="form-text text-muted">Maximum 1000 characters</small>
+            </div>
+
+            <div class="mb-3">
+                <label for="category" class="form-label">Category <span class="text-danger">*</span></label>
+                <InputSelect id="category" class="form-select"
+                    @bind-Value="uploadModel.Category">
+                    <option value="">-- Select Category --</option>
+                    <option value="ProjectDocuments">Project Documents</option>
+                    <option value="PersonalFiles">Personal Files</option>
+                    <option value="TeamResources">Team Resources</option>
+                    <option value="Reports">Reports</option>
+                    <option value="Presentations">Presentations</option>
+                    <option value="Other">Other</option>
+                </InputSelect>
+                <div class="invalid-feedback">@GetError("category")</div>
+            </div>
+
+            @if (showProjectSelector)
+            {
+                <div class="mb-3">
+                    <label for="project" class="form-label">Project</label>
+                    <InputSelect id="project" class="form-select"
+                        @bind-Value="uploadModel.ProjectId">
+                        <option value="">-- No project (Personal Document) --</option>
+                        @if (availableProjects != null)
+                        {
+                            @foreach (var project in availableProjects)
+                            {
+                                <option value="@project.ProjectId">@project.ProjectName</option>
+                            }
+                        }
+                    </InputSelect>
+                </div>
+            }
+
+            <div class="mb-3">
+                <label for="tags" class="form-label">Tags (comma-separated)</label>
+                <InputText id="tags" class="form-control"
+                    @bind-Value="uploadModel.Tags" placeholder="e.g., important, draft, review" />
+                <small class="form-text text-muted">Maximum 5 tags recommended</small>
+            </div>
+
+            <div class="d-grid gap-2 d-sm-flex justify-content-sm-end">
+                <button type="submit" class="btn btn-primary" disabled="@(uploadInProgress || selectedFile == null)">
+                    @if (uploadInProgress)
+                    {
+                        <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                        <span>Uploading...</span>
+                    }
+                    else
+                    {
+                        <span>Upload Document</span>
+                    }
+                </button>
+                <button type="reset" class="btn btn-secondary" @onclick="ClearForm" disabled="@uploadInProgress">Clear</button>
+            </div>
+        </EditForm>
+    </div>
+</div>
+
+@code {
+    private EditContext editContext = null!;
+    private InputFile? fileInput;
+    private IBrowserFile? selectedFile;
+    private bool uploadInProgress = false;
+    private string? errorMessage;
+    private string? successMessage;
+    private string? uploadFileName;
+    private int uploadProgressPercent = 0;
+    private bool showProjectSelector = true;
+    private List<ProjectViewModel>? availableProjects;
+
+    private UploadFormModel uploadModel = new();
+
+    protected override void OnInitialized()
+    {
+        editContext = new EditContext(uploadModel);
+    }
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        selectedFile = e.File;
+        
+        // Validate file size client-side
+        const long maxFileSize = 25 * 1024 * 1024; // 25MB
+        if (selectedFile.Size > maxFileSize)
+        {
+            errorMessage = $"File size exceeds 25MB limit. Selected file: {FormatFileSize(selectedFile.Size)}";
+            selectedFile = null;
+        }
+    }
+
+    private async Task HandleSubmit()
+    {
+        if (selectedFile == null)
+        {
+            errorMessage = "Please select a file to upload";
+            return;
+        }
+
+        if (!editContext.Validate())
+        {
+            return;
+        }
+
+        uploadInProgress = true;
+        uploadFileName = selectedFile.Name;
+        errorMessage = null;
+        successMessage = null;
+
+        try
+        {
+            using var content = new MultipartFormDataContent();
+            
+            // Add file
+            var fileStream = selectedFile.OpenReadStream(25 * 1024 * 1024); // 25MB max
+            content.Add(new StreamContent(fileStream), "file", selectedFile.Name);
+            
+            // Add metadata
+            content.Add(new StringContent(uploadModel.Title), "title");
+            content.Add(new StringContent(uploadModel.Description ?? ""), "description");
+            content.Add(new StringContent(uploadModel.Category), "category");
+            content.Add(new StringContent(uploadModel.Tags ?? ""), "tags");
+            
+            if (uploadModel.ProjectId > 0)
+            {
+                content.Add(new StringContent(uploadModel.ProjectId.ToString()), "projectId");
+            }
+
+            // Make HTTP request
+            using var http = new HttpClient { BaseAddress = new Uri("http://localhost:5000") }; // Adjust URL as needed
+            var response = await http.PostAsync("/api/documentupload/upload", content);
+
+            if (response.IsSuccessStatusCode)
+            {
+                successMessage = $"Document '{uploadModel.Title}' uploaded successfully and queued for virus scanning.";
+                ClearForm();
+                await OnUploadSuccess.InvokeAsync(true);
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                errorMessage = $"Upload failed: {errorContent}";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Upload error: {ex.Message}";
+        }
+        finally
+        {
+            uploadInProgress = false;
+            uploadProgressPercent = 0;
+        }
+    }
+
+    private void ClearForm()
+    {
+        uploadModel = new();
+        selectedFile = null;
+        editContext = new EditContext(uploadModel);
+        if (fileInput != null)
+        {
+            // Note: Can't actually clear file input from code-behind in Blazor
+            // User would need to manually clear it
+        }
+    }
+
+    private void ClearError() => errorMessage = null;
+    private void ClearSuccess() => successMessage = null;
+
+    private bool HasError(string fieldName)
+    {
+        // Validation is handled by ValidationSummary/DataAnnotationsValidator
+        // Return false for now to avoid complex reflection-based error checking
+        return false;
+    }
+
+    private string GetError(string fieldName)
+    {
+        // Simplified; you might want to create proper field accessors
+        return "";
+    }
+
+    private string FormatFileSize(long bytes)
+    {
+        string[] sizes = { "B", "KB", "MB", "GB" };
+        double len = bytes;
+        int order = 0;
+        while (len >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            len = len / 1024;
+        }
+        return $"{len:0.##} {sizes[order]}";
+    }
+
+    // Parameters
+    [Parameter]
+    public EventCallback<bool> OnUploadSuccess { get; set; }
+
+    // Models
+    private class UploadFormModel
+    {
+        public string Title { get; set; } = string.Empty;
+        public string? Description { get; set; }
+        public string Category { get; set; } = "ProjectDocuments";
+        public int ProjectId { get; set; } = 0;
+        public string? Tags { get; set; }
+    }
+
+    private class ProjectViewModel
+    {
+        public int ProjectId { get; set; }
+        public string ProjectName { get; set; } = string.Empty;
+    }
+}
