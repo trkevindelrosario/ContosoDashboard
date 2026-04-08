@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using ContosoDashboard.Models;
+using ContosoDashboard.Models.Documents;
 
 namespace ContosoDashboard.Data;
 
@@ -17,6 +18,12 @@ public class ApplicationDbContext : DbContext
     public DbSet<Notification> Notifications { get; set; } = null!;
     public DbSet<ProjectMember> ProjectMembers { get; set; } = null!;
     public DbSet<Announcement> Announcements { get; set; } = null!;
+
+    // Document Management Entities
+    public DbSet<Document> Documents { get; set; } = null!;
+    public DbSet<DocumentAccessLog> DocumentAccessLogs { get; set; } = null!;
+    public DbSet<FileQuarantine> FileQuarantines { get; set; } = null!;
+    public DbSet<DocumentScanQueue> DocumentScanQueues { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -63,6 +70,88 @@ public class ApplicationDbContext : DbContext
         modelBuilder.Entity<User>()
             .HasIndex(u => u.Email)
             .IsUnique();
+
+        // Configure Document entity relationships and indexes
+        modelBuilder.Entity<Document>()
+            .HasOne(d => d.User)
+            .WithMany()
+            .HasForeignKey(d => d.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Document>()
+            .HasOne(d => d.Project)
+            .WithMany()
+            .HasForeignKey(d => d.ProjectId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        // Document indexes for query performance
+        modelBuilder.Entity<Document>()
+            .HasIndex(d => d.UserId);
+
+        modelBuilder.Entity<Document>()
+            .HasIndex(d => d.ProjectId);
+
+        modelBuilder.Entity<Document>()
+            .HasIndex(d => d.Category);
+
+        modelBuilder.Entity<Document>()
+            .HasIndex(d => d.ScanStatus);
+
+        modelBuilder.Entity<Document>()
+            .HasIndex(d => new { d.UploadDate })
+            .HasDatabaseName("IX_Document_UploadDate_Desc");
+
+        modelBuilder.Entity<Document>()
+            .HasIndex(d => new { d.UserId, d.ProjectId });
+
+        // StoragePath must be unique to prevent duplicate file storage
+        modelBuilder.Entity<Document>()
+            .HasIndex(d => d.StoragePath)
+            .IsUnique();
+
+        // Configure DocumentAccessLog relationships
+        modelBuilder.Entity<DocumentAccessLog>()
+            .HasOne(l => l.Document)
+            .WithMany(d => d.AccessLogs)
+            .HasForeignKey(l => l.DocumentId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<DocumentAccessLog>()
+            .HasOne(l => l.User)
+            .WithMany()
+            .HasForeignKey(l => l.UserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        // DocumentAccessLog indexes for audit queries
+        modelBuilder.Entity<DocumentAccessLog>()
+            .HasIndex(l => new { l.DocumentId, l.Timestamp });
+
+        modelBuilder.Entity<DocumentAccessLog>()
+            .HasIndex(l => new { l.UserId, l.Operation });
+
+        modelBuilder.Entity<DocumentAccessLog>()
+            .HasIndex(l => l.Timestamp);
+
+        // Configure FileQuarantine relationships
+        modelBuilder.Entity<FileQuarantine>()
+            .HasOne(q => q.Document)
+            .WithOne(d => d.Quarantine)
+            .HasForeignKey<FileQuarantine>(q => q.DocumentId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Configure DocumentScanQueue relationships
+        modelBuilder.Entity<DocumentScanQueue>()
+            .HasOne(q => q.Document)
+            .WithOne(d => d.ScanQueue)
+            .HasForeignKey<DocumentScanQueue>(q => q.DocumentId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // DocumentScanQueue indexes for background job polling
+        modelBuilder.Entity<DocumentScanQueue>()
+            .HasIndex(q => new { q.Status, q.EnqueuedAt });
+
+        modelBuilder.Entity<DocumentScanQueue>()
+            .HasIndex(q => q.DocumentId);
 
         // Seed initial data
         SeedData(modelBuilder);
