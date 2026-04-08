@@ -1,0 +1,203 @@
+@page "/project/{ProjectId:int}/documents"
+@using ContosoDashboard.Services
+@using ContosoDashboard.Services.Documents
+@using ContosoDashboard.Models
+@using ContosoDashboard.Models.Documents
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@using System.Security.Claims
+@using System.Text.Json
+
+@attribute [Authorize]
+@inject IDocumentService DocumentService
+@inject NavigationManager NavigationManager
+@inject AuthenticationStateProvider AuthenticationStateProvider
+
+<div class="container-fluid mt-4">
+    <div class="row mb-4">
+        <div class="col-md-8">
+            <h2>Project Documents</h2>
+            <p class="text-muted">Manage all documents associated with this project</p>
+        </div>
+        <div class="col-md-4 text-end">
+            <button class="btn btn-primary" @onclick="() => showUploadForm = !showUploadForm">
+                <i class="bi bi-cloud-arrow-up"></i> Upload Document
+            </button>
+        </div>
+    </div>
+
+    @if (showUploadForm)
+    {
+        <div class="card mb-4 border-primary">
+            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                <span>Upload New Document</span>
+                <button type="button" class="btn-close btn-close-white" @onclick="() => showUploadForm = false"></button>
+            </div>
+            <div class="card-body">
+                <DocumentUploadForm ProjectId="@ProjectId" OnUploadSuccess="@(async (success) => { if (success) { await RefreshDocuments(); } })" />
+            </div>
+        </div>
+    }
+
+    @if (isLoading)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading documents...</span>
+            </div>
+            <p class="mt-2 text-muted">Loading documents...</p>
+        </div>
+    }
+    else if (documents == null || documents.Count == 0)
+    {
+        <div class="alert alert-info" role="alert">
+            <i class="bi bi-info-circle"></i> No documents uploaded yet. 
+            <button class="btn btn-sm btn-outline-info" @onclick="() => showUploadForm = true">Upload your first document</button>
+        </div>
+    }
+    else
+    {
+        <div class="row">
+            <div class="col-12">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Title</th>
+                                <th>File Name</th>
+                                <th>Size</th>
+                                <th>Category</th>
+                                <th>Scan Status</th>
+                                <th>Uploaded</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var doc in documents)
+                            {
+                                <tr>
+                                    <td>
+                                        <strong>@doc.Title</strong>
+                                        @if (!string.IsNullOrEmpty(doc.Description))
+                                        {
+                                            <br />
+                                            <small class="text-muted">@doc.Description</small>
+                                        }
+                                    </td>
+                                    <td>
+                                        <code>@doc.FileName</code>
+                                    </td>
+                                    <td>
+                                        @FormatFileSize(doc.FileSize)
+                                    </td>
+                                    <td>
+                                        <span class="badge bg-secondary">@doc.Category</span>
+                                    </td>
+                                    <td>
+                                        @switch (doc.ScanStatus)
+                                        {
+                                            case ScanStatus.Pending:
+                                                <span class="badge bg-warning text-dark">
+                                                    <i class="bi bi-hourglass-split"></i> Pending Scan
+                                                </span>
+                                                break;
+                                            case ScanStatus.Scanning:
+                                                <span class="badge bg-info">
+                                                    <i class="bi bi-arrow-repeat"></i> Scanning...
+                                                </span>
+                                                break;
+                                            case ScanStatus.Clear:
+                                                <span class="badge bg-success">
+                                                    <i class="bi bi-check-circle"></i> Clear
+                                                </span>
+                                                break;
+                                            case ScanStatus.Quarantined:
+                                                <span class="badge bg-danger">
+                                                    <i class="bi bi-exclamation-triangle"></i> Quarantined
+                                                </span>
+                                                break;
+                                        }
+                                    </td>
+                                    <td>
+                                        <small class="text-muted">
+                                            @doc.UploadDate.ToString("g")
+                                        </small>
+                                    </td>
+                                    <td>
+                                        @if (doc.ScanStatus == ScanStatus.Clear)
+                                        {
+                                            <button class="btn btn-sm btn-outline-primary" @onclick="() => DownloadDocument(doc.DocumentId)">
+                                                <i class="bi bi-download"></i> Download
+                                            </button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-outline-secondary" disabled title="Document not cleared for download">
+                                                <i class="bi bi-download"></i> Download
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public int ProjectId { get; set; }
+
+    private List<Document> documents = new();
+    private bool isLoading = true;
+    private bool showUploadForm = false;
+    private int currentUserId = 0;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            // Get current user ID from authentication state
+            var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+            var userIdClaim = authState.User.FindFirst(ClaimTypes.NameIdentifier);
+            
+            if (userIdClaim != null && int.TryParse(userIdClaim.Value, out int userId))
+            {
+                currentUserId = userId;
+                // Load documents for this project
+                documents = await DocumentService.ListAsync(userId, ProjectId);
+            }
+            
+            isLoading = false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error loading documents: {ex.Message}");
+            isLoading = false;
+        }
+    }
+
+    private async Task RefreshDocuments()
+    {
+        // Refresh document list after successful upload
+        showUploadForm = false;
+        isLoading = true;
+        await OnInitializedAsync();
+    }
+
+    private void DownloadDocument(int documentId)
+    {
+        NavigationManager.NavigateTo($"/api/documentdownload/download/{documentId}", true);
+    }
+
+    private string FormatFileSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
+    }
+}

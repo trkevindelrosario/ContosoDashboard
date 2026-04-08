@@ -139,6 +139,7 @@
 
     protected override void OnInitialized()
     {
+        uploadModel.ProjectId = ProjectId;
         editContext = new EditContext(uploadModel);
     }
 
@@ -221,7 +222,7 @@
 
     private void ClearForm()
     {
-        uploadModel = new();
+        uploadModel = new() { ProjectId = ProjectId };
         selectedFile = null;
         editContext = new EditContext(uploadModel);
         if (fileInput != null)
@@ -261,6 +262,9 @@
     }
 
     // Parameters
+    [Parameter]
+    public int ProjectId { get; set; } = 0;
+
     [Parameter]
     public EventCallback<bool> OnUploadSuccess { get; set; }
 
