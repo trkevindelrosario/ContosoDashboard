@@ -7,6 +7,18 @@
 
 ---
 
+## Clarifications
+
+### Session 2026-04-08
+
+- Q: Which virus scanning service should be used? → A: ClamAV (open-source, local scanning, no external dependencies)
+- Q: Should storage quotas be enforced per user or project? → A: No quotas (unlimited storage for training purposes)
+- Q: Should deleted documents be soft-deleted (recoverable) or hard-deleted (permanent)? → A: Hard delete (immediate permanent removal)
+- Q: Should upload rate limits be enforced (e.g., max concurrent uploads per user)? → A: No rate limits (unlimited concurrent uploads for training)
+- Q: What is the retention period for deleted document audit records? → A: 7-year retention (matches GDPR compliance assumption)
+
+---
+
 ## Executive Summary
 
 Contoso Corporation is adding document upload and management capabilities to the ContosoDashboard application. This feature provides employees with a centralized, secure repository for work-related documents, enabling better organization, discoverability, and controlled sharing across the organization. The feature addresses critical business pain points around document fragmentation, security risks, and audit trails.
@@ -324,9 +336,9 @@ System MUST provide clear, user-friendly error messages for all failure scenario
 
 #### FR-019: Document Deletion
 System MUST allow users to delete documents they have authorization to delete. Deletion MUST:
-- Remove file from storage
-- Remove metadata records from database
-- Maintain audit log entry showing document was deleted and by whom
+- Immediately remove file from storage (hard delete, not recoverable)
+- Immediately remove metadata records from database
+- Maintain audit log entry showing document was deleted, by whom, and when
 - Prevent undeleting (permanent deletion)
 
 #### FR-020: Audit Logging
@@ -412,10 +424,13 @@ Represents documents that failed security scanning.
 - No browser-accessible file URLs (all access through authorized controller endpoints)
 
 ### File Security
-- All file uploads must pass virus/malware scanning before availability
+- All file uploads must pass virus/malware scanning using **ClamAV** (open-source antivirus engine)
+- ClamAV scans files locally without external API calls (supports offline training mode)
+- Scanning must complete before other users can access the file (async background task)
 - Access to files controlled through authorization checks in download controller
 - File storage location must be outside web-accessible directories
 - Implement secure headers on file downloads (Content-Disposition: attachment, X-Content-Type-Options: nosniff)
+- ClamAV integration: Use ClamAV.Net NuGet package or command-line interface
 
 ### Database Schema
 - New Documents table with columns for metadata and file information
@@ -428,12 +443,15 @@ Represents documents that failed security scanning.
 - Sorting and filtering must return results in under 1 second
 - Large file uploads (25 MB) must handle network interruption gracefully
 - Virus scanning must not block UI indefinitely (use async/background processing)
+- No rate limiting on concurrent uploads per user (unlimited concurrent uploads allowed in training)
 
 ### Compliance & Privacy
 - Personal documents (category = Personal Files) visible only to owner and administrators
 - Project documents visible to all project team members and administrators
 - Full audit trail maintained for all document access and modifications
-- GDPR-compliant data retention (assume standard 7-year retention for work documents)
+- Deleted documents: Hard delete (immediate removal from filesystem and database)
+- Deleted document audit records: Retained for 7 years per GDPR compliance standards, then auto-purged
+- Users can request audit history of their document access for compliance investigations
 
 ### Browser Compatibility
 - Support all modern browsers (Chrome, Firefox, Safari, Edge, versions from past 2 years)
@@ -441,7 +459,8 @@ Represents documents that failed security scanning.
 - Upload functionality must work with keyboard and screen readers for accessibility
 
 ### Integration Assumptions
-- Virus scanning service available (e.g., Windows Defender API, ClamAV, or cloud service like VirusTotal)
+- ClamAV antivirus engine available for file scanning (local processing, no external API calls)
+- No per-user or per-project storage quotas for training version (unlimited storage)
 - Existing User and Project entities available for relationships
 - Existing authentication and authorization system in place
 - File system with adequate storage capacity for documents
