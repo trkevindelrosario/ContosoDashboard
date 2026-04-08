@@ -1,5 +1,7 @@
 @using Microsoft.AspNetCore.Components.Forms
 @using System.Collections.Generic
+@using Microsoft.AspNetCore.Components.Authorization
+@using System.Security.Claims
 
 <div class="card">
     <div class="card-header">
@@ -124,6 +126,10 @@
 </div>
 
 @code {
+    [Inject] private IProjectService? ProjectService { get; set; }
+    [Inject] private AuthenticationStateProvider? AuthenticationStateProvider { get; set; }
+    [Inject] private HttpClient? Http { get; set; }
+
     private EditContext editContext = null!;
     private InputFile? fileInput;
     private IBrowserFile? selectedFile;
@@ -137,10 +143,35 @@
 
     private UploadFormModel uploadModel = new();
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
         uploadModel.ProjectId = ProjectId;
         editContext = new EditContext(uploadModel);
+        
+        // Load available projects for current user
+        if (ProjectService != null && AuthenticationStateProvider != null)
+        {
+            try
+            {
+                var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+                var user = authState.User;
+                var userIdClaim = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+                
+                if (userIdClaim != null && int.TryParse(userIdClaim.Value, out int userId))
+                {
+                    var projects = await ProjectService.GetUserProjectsAsync(userId);
+                    availableProjects = projects.Select(p => new ProjectViewModel 
+                    { 
+                        ProjectId = p.ProjectId, 
+                        ProjectName = p.Name 
+                    }).ToList();
+                }
+            }
+            catch
+            {
+                availableProjects = new List<ProjectViewModel>();
+            }
+        }
     }
 
     private async Task OnFileSelected(InputFileChangeEventArgs e)
@@ -193,9 +224,15 @@
                 content.Add(new StringContent(uploadModel.ProjectId.ToString()), "projectId");
             }
 
-            // Make HTTP request
-            using var http = new HttpClient { BaseAddress = new Uri("http://localhost:5000") }; // Adjust URL as needed
-            var response = await http.PostAsync("/api/documentupload/upload", content);
+            // Make HTTP request using injected HttpClient
+            if (Http == null)
+            {
+                errorMessage = "HTTP client not available";
+                uploadInProgress = false;
+                return;
+            }
+
+            var response = await Http.PostAsync("/api/documentupload/upload", content);
 
             if (response.IsSuccessStatusCode)
             {
