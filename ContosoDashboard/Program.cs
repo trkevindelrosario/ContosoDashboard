@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using ContosoDashboard.Data;
 using ContosoDashboard.Services;
+using ContosoDashboard.Services.Documents;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Components.Authorization;
 
@@ -43,6 +44,14 @@ builder.Services.AddScoped<ITaskService, TaskService>();
 builder.Services.AddScoped<IProjectService, ProjectService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IDashboardService, DashboardService>();
+
+// Register document management services
+builder.Services.AddScoped<IDocumentService, DocumentService>();
+builder.Services.AddScoped<IFileStorageService, FileStorageService>();
+builder.Services.AddScoped<IClamAVService, LocalClamAVService>();
+
+// Register hosted service for background async virus scanning
+builder.Services.AddHostedService<DocumentScanningHostedService>();
 
 // Add HttpContextAccessor for accessing user claims
 builder.Services.AddHttpContextAccessor();
