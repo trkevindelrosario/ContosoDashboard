@@ -129,6 +129,7 @@
     [Inject] private IProjectService? ProjectService { get; set; }
     [Inject] private AuthenticationStateProvider? AuthenticationStateProvider { get; set; }
     [Inject] private HttpClient? Http { get; set; }
+    [Inject] private NavigationManager? NavigationManager { get; set; }
 
     private EditContext editContext = null!;
     private InputFile? fileInput;
@@ -225,14 +226,16 @@
             }
 
             // Make HTTP request using injected HttpClient
-            if (Http == null)
+            if (Http == null || NavigationManager == null)
             {
-                errorMessage = "HTTP client not available";
+                errorMessage = "HTTP client or navigation manager not available";
                 uploadInProgress = false;
                 return;
             }
 
-            var response = await Http.PostAsync("/api/documentupload/upload", content);
+            // Build absolute URI
+            var uploadUri = new Uri(NavigationManager.BaseUri + "api/documentupload/upload".TrimStart('/'));
+            var response = await Http.PostAsync(uploadUri, content);
 
             if (response.IsSuccessStatusCode)
             {
