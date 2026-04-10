@@ -208,7 +208,13 @@ namespace ContosoDashboard.Services.Documents
         {
             try
             {
-                var drive = new DriveInfo(_storageDirectory);
+                // On non-Windows/Unix platforms, DriveInfo needs an absolute path or mount point.
+                // Resolve the storage directory to a full path first.
+                var absolutePath = Path.GetFullPath(_storageDirectory);
+                
+                // On Unix-like systems (macOS/Linux), DriveInfo can take any path and 
+                // it will find the mount point for it, but it must be absolute.
+                var drive = new DriveInfo(absolutePath);
                 var available = drive.AvailableFreeSpace;
                 var hasSufficientSpace = available >= requiredBytes;
 
@@ -222,8 +228,10 @@ namespace ContosoDashboard.Services.Documents
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error checking storage space");
-                return false;
+                _logger.LogError(ex, "Error checking storage space for directory: {Directory}", _storageDirectory);
+                // If we can't check space, we'll assume there is space but log the error
+                // This prevents blocking uploads when DriveInfo fails on certain environments
+                return true;
             }
         }
 

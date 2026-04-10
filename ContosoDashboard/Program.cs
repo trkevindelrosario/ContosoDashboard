@@ -50,6 +50,7 @@ builder.Services.AddScoped<IDocumentService, DocumentService>();
 builder.Services.AddScoped<IFileStorageService, FileStorageService>();
 builder.Services.AddScoped<IClamAVService, LocalClamAVService>();
 builder.Services.AddScoped<DocumentNotificationService>();
+builder.Services.AddScoped<IDocumentUploadService, DocumentUploadService>();
 
 // Register SignalR for real-time document notifications
 builder.Services.AddSignalR();
@@ -61,7 +62,11 @@ builder.Services.AddHostedService<DocumentScanningHostedService>();
 builder.Services.AddHttpContextAccessor();
 
 // Register HttpClient for use in Blazor components
-builder.Services.AddScoped<HttpClient>();
+// In Blazor Server, HttpClient uses the server context automatically
+builder.Services.AddScoped<HttpClient>(sp =>
+{
+    return new HttpClient { BaseAddress = new Uri("http://localhost:5000/") };
+});
 
 var app = builder.Build();
 

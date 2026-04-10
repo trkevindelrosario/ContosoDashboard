@@ -2,6 +2,7 @@
 @using System.Collections.Generic
 @using Microsoft.AspNetCore.Components.Authorization
 @using System.Security.Claims
+@using ContosoDashboard.Services
 
 <div class="card">
     <div class="card-header">
@@ -128,8 +129,7 @@
 @code {
     [Inject] private IProjectService? ProjectService { get; set; }
     [Inject] private AuthenticationStateProvider? AuthenticationStateProvider { get; set; }
-    [Inject] private HttpClient? Http { get; set; }
-    [Inject] private NavigationManager? NavigationManager { get; set; }
+    [Inject] private IDocumentUploadService? DocumentUploadService { get; set; }
 
     private EditContext editContext = null!;
     private InputFile? fileInput;
@@ -208,45 +208,62 @@
 
         try
         {
-            using var content = new MultipartFormDataContent();
-            
-            // Add file
-            var fileStream = selectedFile.OpenReadStream(25 * 1024 * 1024); // 25MB max
-            content.Add(new StreamContent(fileStream), "file", selectedFile.Name);
-            
-            // Add metadata
-            content.Add(new StringContent(uploadModel.Title), "title");
-            content.Add(new StringContent(uploadModel.Description ?? ""), "description");
-            content.Add(new StringContent(uploadModel.Category), "category");
-            content.Add(new StringContent(uploadModel.Tags ?? ""), "tags");
-            
-            if (uploadModel.ProjectId > 0)
+            // Get current user ID from authentication state
+            if (AuthenticationStateProvider == null)
             {
-                content.Add(new StringContent(uploadModel.ProjectId.ToString()), "projectId");
-            }
-
-            // Make HTTP request using injected HttpClient
-            if (Http == null || NavigationManager == null)
-            {
-                errorMessage = "HTTP client or navigation manager not available";
+                errorMessage = "Authentication unavailable";
                 uploadInProgress = false;
                 return;
             }
 
-            // Build absolute URI
-            var uploadUri = new Uri(NavigationManager.BaseUri + "api/documentupload/upload".TrimStart('/'));
-            var response = await Http.PostAsync(uploadUri, content);
-
-            if (response.IsSuccessStatusCode)
+            var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+            var user = authState.User;
+            var userIdClaim = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+            
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
             {
-                successMessage = $"Document '{uploadModel.Title}' uploaded successfully and queued for virus scanning.";
+                errorMessage = "User identity could not be determined";
+                uploadInProgress = false;
+                return;
+            }
+
+            if (DocumentUploadService == null)
+            {
+                errorMessage = "Document upload service not available";
+                uploadInProgress = false;
+                return;
+            }
+
+            // Prepare tags list
+            var tags = string.IsNullOrWhiteSpace(uploadModel.Tags)
+                ? new List<string>()
+                : uploadModel.Tags.Split(',')
+                    .Select(t => t.Trim())
+                    .Where(t => !string.IsNullOrEmpty(t))
+                    .ToList();
+
+            // Convert IBrowserFile to IFormFile for server-side service
+            Microsoft.AspNetCore.Http.IFormFile formFile = new BrowserFileFormFileAdapter(selectedFile);
+
+            // Call the server-side document upload service
+            var result = await DocumentUploadService.UploadAsync(
+                userId,
+                uploadModel.ProjectId > 0 ? uploadModel.ProjectId : null,
+                uploadModel.Title,
+                uploadModel.Description,
+                uploadModel.Category,
+                tags,
+                formFile);
+
+            if (result.Success)
+            {
+                successMessage = result.Message ?? $"Document '{uploadModel.Title}' uploaded successfully and queued for virus scanning.";
                 ClearForm();
                 await OnUploadSuccess.InvokeAsync(true);
             }
             else
             {
-                var errorContent = await response.Content.ReadAsStringAsync();
-                errorMessage = $"Upload failed: {errorContent}";
+                errorMessage = result.ErrorMessage ?? "Unknown error occurred during upload";
             }
         }
         catch (Exception ex)
